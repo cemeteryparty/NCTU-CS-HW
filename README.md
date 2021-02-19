@@ -12,4 +12,5 @@ NCTUCS Homework Collection
 		- [Intro. to Algorithms](2019-Fall/Intro-to-Algorithms/)
 	- 2020 Spring
 		- [Intro. to Artificial Intelligence](2020-Spring/Intro-to-Artificial-Intelligence/)
+		- [Intro. to Computer Security](2020-Spring/Intro-to-Computer-Security/)
 	- 2020 Fall
