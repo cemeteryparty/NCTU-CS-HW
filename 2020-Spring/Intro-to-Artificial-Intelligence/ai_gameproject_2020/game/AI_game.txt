@@ -1,0 +1,5 @@
+$ ./AI_game.exe
+> <SAMPLE#>
+> <BASE-DIR>/Sample<SAMPLE#>.exe
+> 42
+> <BASE-DIR>/<PROG_NAME>.exe
