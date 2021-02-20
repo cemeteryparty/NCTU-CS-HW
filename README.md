@@ -13,4 +13,5 @@ NCTUCS Homework Collection
 	- 2020 Spring
 		- [Intro. to Artificial Intelligence](2020-Spring/Intro-to-Artificial-Intelligence/)
 		- [Intro. to Computer Security](2020-Spring/Intro-to-Computer-Security/)
+		- [Computer Organization](2020-Spring/Computer-Organization/)
 	- 2020 Fall
