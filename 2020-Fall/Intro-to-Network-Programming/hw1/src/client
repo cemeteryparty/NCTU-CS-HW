@@ -1,0 +1,69 @@
+#!/usr/bin/python3
+
+from socket import *
+import sys, json
+
+class ClientService(object):
+	def __init__(self, ServerIP, ServerPort):
+		self.ServerIP = ServerIP
+		self.ServerPort = ServerPort
+		self.UseTCP = ["login", "logout", "list-user", "exit", "echo"]
+		self.sessionID = -1
+	def CreateSockfd(self):
+		try:
+			# create TCP socket
+			sockfd_t = socket(AF_INET, SOCK_STREAM)
+			sockfd_t.connect((self.ServerIP, self.ServerPort))
+			# create UDP socket
+			sockfd_u = socket(AF_INET, SOCK_DGRAM)
+			return sockfd_t, sockfd_u
+		except:
+			print(f"[x] Failed to connect to {self.ServerIP}:{self.ServerPort}")
+			exit(-1)
+	def TransSelect(self, climsg):
+		cmd = climsg.split(" ")[0]
+		if cmd in self.UseTCP:
+			return "tcp"
+		return "udp"
+	def UDPsender(self, UDPsockfd, climsg):
+		msg2serv = json.dumps({'msg': climsg, 'sid': self.sessionID})
+		UDPsockfd.sendto(msg2serv.encode(), (self.ServerIP, self.ServerPort))
+		servmsg, servaddr = UDPsockfd.recvfrom(1024)
+		return self.HandleServerMsg(servmsg.decode())
+	def TCPsender(self, TCPsockfd, climsg):
+		msg2serv = json.dumps({'msg': climsg, 'sid': self.sessionID})
+		TCPsockfd.send(msg2serv.encode())
+		servmsg = TCPsockfd.recv(1024).decode()
+		return self.HandleServerMsg(servmsg)
+	def HandleServerMsg(self, servmsg):
+		content = json.loads(servmsg)
+		self.sessionID = content["sid"]
+		return content["msg"]
+def main():
+	if len(sys.argv) != 3:
+		print("\tInvalid parameters!!!")
+		print(f"\tUsage {sys.argv[0]} <Server IP> <Server Port>")
+		exit(-1)
+	CliSer = ClientService(sys.argv[1], int(sys.argv[2]))
+	TCPsockfd, UDPsockfd = CliSer.CreateSockfd() # create TCP socket, UDP socket
+	InitialStatus = CliSer.UDPsender(UDPsockfd, "INITIAL")
+	print(InitialStatus)
+
+	try:
+		while True:
+			climsg = input("% ")
+			protocol = CliSer.TransSelect(climsg)
+			if protocol == "tcp":
+				servmsg = CliSer.TCPsender(TCPsockfd, climsg)
+			else: # use "udp" as default
+				servmsg = CliSer.UDPsender(UDPsockfd, climsg)
+			if climsg == "exit":
+				break
+			print(servmsg)
+	except KeyboardInterrupt:
+		CliSer.TCPsender(TCPsockfd, "exit")
+	
+	TCPsockfd.close()
+	UDPsockfd.close()
+if __name__ == "__main__":
+	main()

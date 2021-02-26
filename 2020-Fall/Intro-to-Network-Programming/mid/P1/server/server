@@ -1,0 +1,85 @@
+#!/usr/bin/python3
+
+from socket import *
+import sys, os, time
+
+class ServerService(object):
+	def __init__(self, HostName, ListenPort):
+		self.HostName = HostName
+		self.ListenPort = ListenPort
+		self.FPath = "./"
+	def CreateSockfd(self):
+		# create UDP socket
+		try:
+			self.UDPsockfd = socket(AF_INET, SOCK_DGRAM)
+			self.UDPsockfd.bind((self.HostName, self.ListenPort))
+		except Exception as err:
+			print(f"[x] E: {err}")
+			exit(-1)
+		print(f"[*] Server listening on {self.HostName}:{self.ListenPort}")
+	def HandleUDP(self):
+		sockfd = self.UDPsockfd
+		climsg, cliaddr = sockfd.recvfrom(1024)
+		climsg = climsg.decode()
+		msg2cli = self.HandleClientMsg(climsg, cliaddr)
+		sockfd.sendto(msg2cli.encode(), (cliaddr[0], cliaddr[1]))
+	def HandleClientMsg(self, climsg, cliaddr):
+		ArgList = climsg.split(" ")
+		servmsg, cmd = "", ArgList[0]
+		if cmd == "get-file-list":
+			ld = os.listdir(self.FPath)
+			for _ in ld:
+				servmsg += (_ + " ")
+		elif cmd == "get-file":
+			servmsg = self.GetFile(len(ArgList), ArgList, cliaddr)
+		elif cmd == "exit":
+			servmsg = "CLIENTEXIT"
+		else:
+			servmsg = f"{cmd}: Command not found."
+		return servmsg
+	def GetFile(self, argc, argv, cliaddr):
+		if argc < 2:
+			return "Usage: get-file <FileName>"
+		FileName = self.FPath + argv[1]
+		if not os.path.exists(FileName):
+			return "E: File not exists."
+		try:
+			ffd = open(FileName, "rb")
+		except Exception as err:
+			print(f"E: {err}")
+			return "E: File can't be sent."
+		sockfd = self.UDPsockfd
+		sockfd.sendto("finit".encode(), (cliaddr[0], cliaddr[1]))
+		while True:
+			datagram = ffd.read(1024)
+			if not datagram:
+				break
+			sockfd.sendto(datagram, (cliaddr[0], cliaddr[1]))
+			time.sleep(0.05)
+		ffd.close()
+		return "fend"
+	def Close(self):
+		self.UDPsockfd.close()
+def main():
+	if len(sys.argv) != 2:
+		print(f"Usage:\n {sys.argv[0]} <Listen Port>")
+		exit(-1)
+	try:
+		HostName, ListenPort = "127.0.0.1", int(sys.argv[1])
+	except ValueError:
+		print("Invalid parameters:\n <Listen Port> isn't valid")
+		exit(-1)
+	ServSer = ServerService(HostName, ListenPort)
+	ServSer.CreateSockfd()
+
+	while True:
+		try:
+			ServSer.HandleUDP()
+		except KeyboardInterrupt:
+			print("\n[-] Server close...")
+			break
+
+	ServSer.Close()
+if __name__ == "__main__":
+	main()
+

@@ -1,0 +1,78 @@
+#!/usr/bin/python3
+
+from socket import *
+import threading, sys
+
+class ServerService(object):
+	def __init__(self, HostName, ListenPort):
+		self.HostName = HostName
+		self.ListenPort = ListenPort
+		self.Session = {('ip', 'port'): 0}
+	def CreateSockfd(self):
+		# create TCP master socket
+		try:
+			msockfd_t = socket(AF_INET, SOCK_STREAM)
+			msockfd_t.bind((self.HostName, self.ListenPort))
+			msockfd_t.listen(10) # listen queue max 10
+		except Exception as err:
+			print(f"[x] E: {err}")
+			exit(-1)
+		print(f"[*] Server listening on {self.HostName}:{self.ListenPort}")
+		return msockfd_t
+	def HandleTCPslave(self, sockfd, cliaddr):
+		sessionID = len(self.Session)
+		self.Session[cliaddr] = sessionID
+		print(f"[+] New Connection from {cliaddr[0]}:{cliaddr[1]}, user{sessionID}")
+		while True:
+			climsg = sockfd.recv(1024).decode().strip()
+			msg2cli = self.HandleClientMsg(climsg, cliaddr)
+			sockfd.send(msg2cli.encode())
+			if msg2cli[:9] == "Bye, user":
+				break
+		sockfd.close() # Client Exit Event
+	def HandleClientMsg(self, climsg, cliaddr):
+		ArgList = climsg.split(" ")
+		servmsg, cmd = "", ArgList[0]
+		if cmd == "get-ip":
+			servmsg = f"IP: {cliaddr[0]}:{cliaddr[1]}\n"
+		elif cmd == "list-users":
+			for saddr in self.Session.keys():
+				if self.Session[saddr]:
+					servmsg += (f"user{self.Session[saddr]}\n")
+		elif cmd == "exit":
+			print(f"[-] user{self.Session[cliaddr]} ({cliaddr[0]}:{cliaddr[1]}) disconnected")
+			servmsg = f"Bye, user{self.Session[cliaddr]}.\n"
+			self.Session[cliaddr] = None # clear Session
+		else:
+			servmsg = f"{cmd}: Command not found.\n"
+		return servmsg
+def main():
+	if len(sys.argv) != 2:
+		print(f"Usage:\n {sys.argv[0]} <Listen Port>")
+		exit(-1)
+	try:
+		HostName, ListenPort = "127.0.0.1", int(sys.argv[1])
+	except ValueError:
+		print("Invalid parameters:\n <Listen Port> isn't valid")
+		exit(-1)
+	ServSer = ServerService(HostName, ListenPort)
+	
+	TCPsockfd = ServSer.CreateSockfd() # create TCP master socket
+	SlaveThreads = []
+		
+	while True:
+		try:
+			clientfd, cliaddr = TCPsockfd.accept() # tcp slave socket
+			handler = threading.Thread(target = ServSer.HandleTCPslave,args = (clientfd, cliaddr))
+			SlaveThreads.append(handler)
+			handler.start()
+		except KeyboardInterrupt:
+			print("\n[-] Server close...")
+			break
+
+	for st in SlaveThreads:
+		st.join()
+	TCPsockfd.close()
+if __name__ == "__main__":
+	main()
+

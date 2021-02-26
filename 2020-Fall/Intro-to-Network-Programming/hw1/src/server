@@ -1,0 +1,146 @@
+#!/usr/bin/python3
+
+from socket import *
+from select import select
+import threading, sys, json, sqlite3
+
+class ServerService(object):
+	def __init__(self, HOSTNAME, ListenPort):
+		self.HOSTNAME = HOSTNAME
+		self.ListenPort = ListenPort
+		self.Session = {} # sessionID: [(USERNAME1, EMAIL2), (USERNAME2, EMAIL2)]
+		self.connection = sqlite3.connect("db.sqlite3", check_same_thread = False)
+		self.cur = self.connection.cursor()
+		self.cur.execute("CREATE TABLE IF NOT EXISTS users(Username text, Email text, Passwd text)")
+	def CreateSockfd(self):
+		# create TCP master socket
+		msockfd_t = socket(AF_INET, SOCK_STREAM)
+		msockfd_t.bind((self.HOSTNAME, self.ListenPort))
+		msockfd_t.listen(10) # listen queue max 10
+		# create UDP socket
+		sockfd_u = socket(AF_INET, SOCK_DGRAM)
+		sockfd_u.bind((self.HOSTNAME, self.ListenPort))
+		print(f"[*] Server listening on 0.0.0.0:{self.ListenPort}")
+		return msockfd_t, sockfd_u
+	def HandleTCPslave(self, sockfd, saddr):
+		while True:
+			climsg = sockfd.recv(1024).decode()
+			msg2cli = self.HandleClientMsg(climsg, saddr)
+			sockfd.send(json.dumps(msg2cli).encode())
+			if msg2cli["sid"] == -1:
+				break
+		sockfd.close() # Client Exit Event
+	def HandleUDP(self, sockfd):
+		climsg, cliaddr = sockfd.recvfrom(1024)
+		climsg = climsg.decode()
+		msg2cli = self.HandleClientMsg(climsg, cliaddr)
+		sockfd.sendto(json.dumps(msg2cli).encode(), (cliaddr[0], cliaddr[1]))
+	def HandleClientMsg(self, climsg, cliaddr):
+		content = json.loads(climsg) # Decode climsg
+		ArgList, sessionID = content["msg"].split(" "), content["sid"]
+		servmsg, cmd = "", ArgList[0]
+		if sessionID != -1:
+			print(f"[*] Received {len(climsg)} bytes from {cliaddr[0]}:{cliaddr[1]}, {climsg}")
+
+		if cmd == "INITIAL" and sessionID == -1:
+			# If sid != -1, this client has finished initiate.
+			# Seen "INITIAL" as unknown cmd
+			servmsg, sessionID = self.InitNewClient()
+			print(f"[+] New Connection ({sessionID}) from {cliaddr[0]}:{cliaddr[1]}")
+		elif cmd == "register":
+			servmsg = self.RegisterEvent(len(ArgList), ArgList)
+		elif cmd == "login":
+			servmsg = self.LoginEvent(len(ArgList), ArgList, sessionID)
+		elif cmd == "logout":
+			servmsg = self.LogoutEvent(sessionID)
+		elif cmd == "whoami" or cmd == "profile" or cmd == "list-user":
+			servmsg = self.QueryProfile(cmd, sessionID)
+		elif cmd == "exit":
+			self.Session[sessionID] = None # clear Session
+			servmsg, sessionID = "CLIENTEXIT", -1
+			print(f"[-] Client ({cliaddr[0]}:{cliaddr[1]}) exit...")
+		elif cmd == "echo":
+			servmsg = content["msg"][5:]
+		else:
+			servmsg = f"{cmd}: Command not found."
+		return {"msg": servmsg, "sid": sessionID}
+	def InitNewClient(self):
+		sessionID = len(self.Session)
+		self.Session[sessionID] = []
+		return '*' * 32 + "\n** Welcome to the BBS server. **\n" + '*' * 32, sessionID
+	def RegisterEvent(self, argc, argv):
+		if argc != 4:
+			return "Usage: register <username> <email> <password>"
+		RegisterPermission = self.cur.execute("SELECT * FROM users WHERE Username=?", (argv[1],)).fetchone()
+		if RegisterPermission:
+			return "Username is already used." # print(RegisterPermission)
+		self.cur.execute("INSERT INTO users VALUES (?, ?, ?)", (argv[1], argv[2], argv[3]))		
+		self.connection.commit()
+		return "Register successfully."
+	def LoginEvent(self, argc, argv, sessionID):
+		if argc != 3:
+			return "Usage: login <username> <password>"
+		# if len(self.Session[sessionID]) and argv[1] == self.Session[sessionID][-1][0]:
+		if len(self.Session[sessionID]):
+			return "Please logout first."
+		LoginStatus = self.cur.execute("SELECT * FROM users WHERE Username=? AND Passwd=?", (argv[1], argv[2])).fetchone()
+		if LoginStatus:
+			self.Session[sessionID].append((LoginStatus[0], LoginStatus[1]))
+			return f"Welcome, {argv[1]}."
+		return "Login failed."
+	def LogoutEvent(self, sessionID):
+		if len(self.Session[sessionID]) == 0:
+			return "Please login first." # no previous login event
+		LastLogin = self.Session[sessionID].pop()
+		return f"Bye, {LastLogin[0]}."
+	def QueryProfile(self, command, sessionID):
+		if command == "list-user":
+			UserTable = self.cur.execute("SELECT * FROM users")
+			UserList = "Name\tEmail"
+			for User in UserTable:
+				UserList += f"\n{User[0]}\t{User[1]}"
+			return UserList
+		if len(self.Session[sessionID]) == 0:
+			return "Please login first." # no previous login event
+		if command == "whoami":
+			return self.Session[sessionID][-1][0]
+		return f"\tUSERNAME: {self.Session[sessionID][-1][0]}\n\tEMAIL: {self.Session[sessionID][-1][1]}"
+	def Close(self):
+		self.connection.close()
+def main():
+	if len(sys.argv) != 2:
+		print("\tInvalid parameters!!!")
+		print(f"\tUsage {sys.argv[0]} <Listen Port>")
+		exit(-1)
+	try:
+		HOSTNAME, ListenPort = "", int(sys.argv[1])
+	except ValueError:
+		print("\tInvalid parameters!!!\n\t<Listen Port> isn't valid")
+		exit(-1)
+	ServSer = ServerService(HOSTNAME, ListenPort)
+	
+	TCPsockfd, UDPsockfd = ServSer.CreateSockfd() # create TCP master socket, UDP socket
+	SockfdSet, SlaveThreads = [TCPsockfd, UDPsockfd], []
+	try:	
+		while True:
+			rdlist, wrlist, exlist = select(SockfdSet, [], [], 0)
+			for sockfd in rdlist:
+				if sockfd == TCPsockfd:
+					clientfd, cliaddr = sockfd.accept() # tcp slave socket
+					# Keep-Alive TCP
+					handler = threading.Thread(target = ServSer.HandleTCPslave,args = (clientfd, cliaddr))
+					SlaveThreads.append(handler)
+					handler.start()
+				elif sockfd == UDPsockfd:
+					ServSer.HandleUDP(sockfd)
+				else:
+					print(f"[!] Unknown type of socket: {sockfd}")
+	except KeyboardInterrupt:
+		print("\n[-] Server close...")
+	for sockfd in SockfdSet:
+		sockfd.close()
+	for st in SlaveThreads:
+		st.join()
+	ServSer.Close()
+if __name__ == "__main__":
+	main()

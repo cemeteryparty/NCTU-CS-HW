@@ -1,0 +1,62 @@
+#!/usr/bin/python3
+
+from socket import *
+import sys, json
+
+class ClientService(object):
+	def __init__(self, ServerIP, ServerPort):
+		self.ServerIP = ServerIP
+		self.ServerPort = ServerPort
+		self.UseTCP = ["login", "logout", "list-user", "exit", "echo"]
+		self.sessionID = -1
+	def TransSelect(self, climsg):
+		cmd = climsg.split(" ")[0]
+		if cmd in self.UseTCP:
+			return "tcp"
+		return "udp"
+	def UDPsender(self, climsg):
+		sockfd = socket(AF_INET, SOCK_DGRAM)
+		msg2serv = json.dumps({'msg': climsg, 'sid': self.sessionID})
+		sockfd.sendto(msg2serv.encode(), (self.ServerIP, self.ServerPort))
+		servmsg, servaddr = sockfd.recvfrom(1024)
+		sockfd.close()
+		return self.HandleServerMsg(servmsg.decode())
+	def TCPsender(self, climsg):
+		sockfd = socket(AF_INET, SOCK_STREAM)
+		sockfd.connect((self.ServerIP, self.ServerPort))
+		msg2serv = json.dumps({'msg': climsg, 'sid': self.sessionID})
+		sockfd.send(msg2serv.encode())
+		servmsg = sockfd.recv(1024).decode()
+		sockfd.close()
+		return self.HandleServerMsg(servmsg)
+	def HandleServerMsg(self, servmsg):
+		content = json.loads(servmsg)
+		self.sessionID = content["sid"]
+		return content["msg"]
+def main():
+	if len(sys.argv) != 3:
+		print("\tInvalid parameters!!!")
+		print(f"\tUsage {sys.argv[0]} <Server IP> <Server Port>")
+		exit(-1)
+	CliSer = ClientService(sys.argv[1], int(sys.argv[2]))
+	InitialStatus = CliSer.UDPsender("INITIAL")
+	if InitialStatus:
+		print(InitialStatus)
+	else:
+		print("[x] Failed to connect to {ServerIP}:{ServerPort}")
+		exit(-1)
+
+	while True:
+		climsg = input("% ")
+		protocol = CliSer.TransSelect(climsg)
+		if protocol == "tcp":
+			servmsg = CliSer.TCPsender(climsg)
+		elif protocol == "udp":
+			servmsg = CliSer.UDPsender(climsg)
+		else:
+			continue
+		if climsg == "exit":
+			break
+		print(servmsg)
+if __name__ == "__main__":
+	main()

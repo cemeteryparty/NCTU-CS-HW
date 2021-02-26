@@ -1,0 +1,243 @@
+#!/usr/bin/python3
+
+from socket import *
+from select import select
+import threading, sys, json, time
+
+class ClientService(object): # BBS
+	def __init__(self, ServerIP, ServerPort):
+		self.ServerIP = ServerIP
+		self.ServerPort = ServerPort
+		self.sessionID = -1
+	def CreateSockfd(self):
+		try:
+			# create TCP socket
+			sockfd_t = socket(AF_INET, SOCK_STREAM)
+			sockfd_t.connect((self.ServerIP, self.ServerPort))
+			# create UDP socket
+			sockfd_u = socket(AF_INET, SOCK_DGRAM)
+			return sockfd_t, sockfd_u
+		except:
+			print(f"[x] Failed to connect to {self.ServerIP}:{self.ServerPort}")
+			exit(-1)
+	def UDPsender(self, UDPsockfd, climsg):
+		msg2serv = json.dumps({'msg': climsg, 'sid': self.sessionID})
+		UDPsockfd.sendto(msg2serv.encode(), (self.ServerIP, self.ServerPort))
+	def TCPsender(self, TCPsockfd, climsg):
+		msg2serv = json.dumps({'msg': climsg, 'sid': self.sessionID})
+		TCPsockfd.send(msg2serv.encode())
+	def HandleServerMsg(self, servmsg):
+		content = json.loads(servmsg)
+		self.sessionID = content["sid"]
+		return content
+class ChatroomServer(object):
+	def __init__(self):
+		self.TCPsockfd = None
+		self.Session = {} # {"Bob": sockfd1, "Amy": sockfd2}
+		self.ClientThreadList = []
+		self.ChatRecord = []
+		self.DumpMessage = False
+	def CreateSockfd(self, ListenIP, ListenPort, Owner):
+		self.ListenIP = ListenIP
+		self.ListenPort = ListenPort
+		self.Owner = Owner
+		try:
+			print("start to create chatroom...")
+			self.TCPsockfd = socket(AF_INET, SOCK_STREAM)
+			self.TCPsockfd.bind((ListenIP, ListenPort))
+			self.TCPsockfd.listen(10)
+		except Exception as err:
+			print(f"[x] E: {err}")
+			self.TCPsockfd = None
+			return -1
+		print('*' * 32 + "\n**  Welcome to the chatroom.  **\n" + '*' * 32)
+		self.DumpMessage = True
+		return 0
+	def AcceptClient(self):
+		clientfd, cliaddr = self.TCPsockfd.accept()
+		ClientThread = threading.Thread(target = self.HandleClient ,args = (clientfd, cliaddr))
+		self.ClientThreadList.append(ClientThread)
+		ClientThread.start()
+	def HandleClient(self, sockfd, saddr):
+		username = sockfd.recv(1024).decode()
+		self.Session[username] = sockfd
+		WelcomeMSG = '*' * 32 + "\n**  Welcome to the chatroom.  **\n" + '*' * 32	
+		for _ in self.ChatRecord[-3:]:
+			WelcomeMSG += f"\n{_}"
+		sockfd.send(WelcomeMSG.encode())
+		self.Broadcast("sys", f"{username} join us.", [username])
+		
+		while True:
+			message = sockfd.recv(1024).decode()
+			
+			if message == "leave-chatroom":
+				self.Broadcast("sys", f"{username} leave us.", [username])
+				break
+			elif len(message) == 0:
+				break
+			else:
+				self.Broadcast(username, message, [username])
+		del self.Session[username]
+		sockfd.close()
+	def ServerSender(self, message):
+		if message == "leave-chatroom":
+			self.Broadcast("signal", "CHATROOM_DOWN_SIGNAL", [self.Owner])
+			self.DumpMessage = False
+			return 0
+		elif message == "detach":
+			self.DumpMessage = False
+			return 0
+		self.Broadcast(self.Owner, message, [self.Owner])
+		return 1
+	def Broadcast(self, sender, message, blacklist):
+		if sender != "signal":
+			timestamp = time.strftime("%H:%M", time.localtime())
+			message = f"{sender}[{timestamp}]: {message}"
+		if not (sender == "signal" or sender == "sys"):
+			self.ChatRecord.append(message)
+		if self.Owner not in blacklist and self.DumpMessage:
+			print(message)
+		for user in self.Session.keys():
+			if user not in blacklist:
+				self.Session[user].send(message.encode())
+	def Return2Chatroom(self):
+		self.DumpMessage = True
+		print('*' * 32 + "\n**  Welcome to the chatroom.  **\n" + '*' * 32)
+		for _ in self.ChatRecord[-3:]:
+			print(_)
+		return 1
+	def ServiceClose(self):
+		if not self.TCPsockfd:
+			return
+		self.Broadcast("signal", "CHATROOM_DOWN_SIGNAL", [self.Owner])
+		for cthread in self.ClientThreadList:
+			cthread.join()
+		self.TCPsockfd.close()
+class ChatroomClient(object):
+	def __init__(self):
+		self.TCPsockfd = None
+	def CreateSockfd(self, ServerIP, ServerPort):
+		self.ServerIP = ServerIP
+		self.ServerPort = ServerPort
+		try:
+			self.TCPsockfd = socket(AF_INET, SOCK_STREAM)
+			self.TCPsockfd.connect((self.ServerIP, self.ServerPort))
+		except Exception as err:
+			print(f"[x] E: {err}")
+			return -1
+		return 0
+	def Send(self, message):
+		self.TCPsockfd.send(message.encode())
+		if message == "leave-chatroom":
+			return 0
+		return 2
+	def Receive(self):
+		response = self.TCPsockfd.recv(1024).decode()
+		if response == "CHATROOM_DOWN_SIGNAL":
+			timestamp = time.strftime("%H:%M", time.localtime())
+			print(f"sys[{timestamp}]: the chatroom is close.")
+			return 0
+		print(response)
+		return 2
+def main():
+	if len(sys.argv) != 3:
+		print(f"Usage:\n {sys.argv[0]} <Server IP> <Server Port>")
+		exit(-1)
+	CliSer = ClientService(sys.argv[1], int(sys.argv[2]))
+	TCPsockfd, UDPsockfd = CliSer.CreateSockfd()
+
+	ChatServ = ChatroomServer()
+	ChatClient = ChatroomClient()
+	try:
+		CliSer.TCPsender(TCPsockfd, "INITIAL")
+		InitialStatus = TCPsockfd.recv(1024)
+		content = CliSer.HandleServerMsg(InitialStatus.decode())
+		print(content["msg"])
+	except Exception as err:
+		print(f"[x] E: {err}")
+		exit(-1)
+
+	FileDescSET = [TCPsockfd, UDPsockfd, sys.stdin]
+	MachineState = 0 # 0: bbs_state, 1: char-server_state, 2: chat-client_state
+	print("% ", end = "", flush = True)
+	while True:
+		try:
+			rdlist, wrlist, exlist = select(FileDescSET, [], [])
+			for sockfd in rdlist:
+				response = None # BBS response
+				if sockfd == TCPsockfd:
+					response = TCPsockfd.recv(1024)
+				elif sockfd == UDPsockfd:
+					response, servaddr = UDPsockfd.recvfrom(1024)
+				elif sockfd == ChatServ.TCPsockfd:
+					ChatServ.AcceptClient()
+				elif sockfd == ChatClient.TCPsockfd:
+					MachineState = ChatClient.Receive()
+					if MachineState == 0:
+						CliSer.TCPsender(TCPsockfd, "RETURN_2_BBS-SERVER_SIGNAL 0")
+						ChatClient.TCPsockfd.close()
+						FileDescSET.remove(ChatClient.TCPsockfd)
+				else:
+					message = sys.stdin.readline().strip()
+					if MachineState == 0:
+						if message.split(" ")[0] in ["list-chatroom", "echo"]:
+							CliSer.UDPsender(UDPsockfd, message) # udp
+						else:
+							CliSer.TCPsender(TCPsockfd, message)
+					elif MachineState == 1:
+						MachineState = ChatServ.ServerSender(message)
+						if MachineState == 0:
+							if message == "leave-chatroom":
+								CliSer.TCPsender(TCPsockfd, "RETURN_2_BBS-SERVER_SIGNAL 1")
+							else:
+								CliSer.TCPsender(TCPsockfd, "RETURN_2_BBS-SERVER_SIGNAL 0")
+					elif MachineState == 2:
+						MachineState = ChatClient.Send(message)
+						if MachineState == 0:
+							CliSer.TCPsender(TCPsockfd, "RETURN_2_BBS-SERVER_SIGNAL 0")
+							FileDescSET.remove(ChatClient.TCPsockfd)
+							ChatClient.TCPsockfd.close()
+			if response: # BBS response
+				content = CliSer.HandleServerMsg(response.decode())
+				if content["code"] == 0:
+					print(content["msg"])
+					print("% ", end = "", flush = True)
+				elif content["code"] == -2:
+					break # exit
+				elif content["code"] == 30: # BBS server accept "logout"
+					if ChatServ.TCPsockfd in FileDescSET:
+						FileDescSET.remove(ChatServ.TCPsockfd)
+						ChatServ.ServiceClose()
+					print(content["msg"])
+					print("% ", end = "", flush = True)
+				elif content["code"] == 31: # BBS server accept "create-chatroom"
+					if ChatServ.CreateSockfd("127.0.0.1", content["msg"][0], content["msg"][1]) == 0:
+						FileDescSET.append(ChatServ.TCPsockfd)
+						CliSer.TCPsender(TCPsockfd, "create-chatroom [OK]")
+						MachineState = 1
+					else:
+						CliSer.TCPsender(TCPsockfd, "create-chatroom [ERROR]")
+						print("% ", end = "", flush = True)
+				elif content["code"] == 32: # BBS server accept "join-chatroom"
+					if ChatClient.CreateSockfd(content["msg"][0][0], content["msg"][0][1]) == 0:
+						FileDescSET.append(ChatClient.TCPsockfd)
+						ChatClient.TCPsockfd.send(content["msg"][1].encode())
+						MachineState = 2
+					else:
+						print("% ", end = "", flush = True)
+				elif content["code"] == 33:
+					print("start to create chatroom...")
+					MachineState = ChatServ.Return2Chatroom()
+				elif content["code"] == 34:
+					MachineState = ChatServ.Return2Chatroom()
+				else:
+					print(content) # Exception
+		except KeyboardInterrupt:
+			CliSer.TCPsender(TCPsockfd, "exit")
+			break
+
+	TCPsockfd.close()
+	UDPsockfd.close()
+	ChatServ.ServiceClose()
+if __name__ == "__main__":
+	main()

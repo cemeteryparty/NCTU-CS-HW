@@ -1,0 +1,117 @@
+#!/usr/bin/python3
+
+from socket import *
+import threading, sys
+
+class ServerService(object):
+	def __init__(self, ):
+		self.Session = {} # sid: sockfd
+		self.Status = {} # sid: (0?mute:unmute)
+		self.ClientThread = []
+	def CreateSockfd(self, ListenIP, ListenPort):
+		try:
+			self.TCPsockfd = socket(AF_INET, SOCK_STREAM)
+			self.TCPsockfd.bind((ListenIP, ListenPort))
+		except Exception as err:
+			print(f"[x] E: {err}")
+			exit(-1)
+		print(f"[*] Server listening on {ListenIP}:{ListenPort}")
+	def Listen(self):
+		sessionID = 0
+		try:
+			self.TCPsockfd.listen(10) # listen queue max 10
+			while True:
+				try:
+					clientfd, cliaddr = self.TCPsockfd.accept() # tcp slave socket
+					self.Session[sessionID] = clientfd
+					self.Status[sessionID] = 1 # unmute mode default
+					
+					SlaveThread = threading.Thread(target = self.HandleTCPslave,args = (sessionID, cliaddr))
+					self.ClientThread.append(SlaveThread)
+					SlaveThread.start()
+
+					sessionID += 1 # next new connection
+				except KeyboardInterrupt:
+					print("\n[-] Server close...")
+					break
+		except Exception as err:
+			print(f"[x] E: {err}")
+			exit(-1)
+	def HandleTCPslave(self, sessionID, saddr):
+		welcome = '*' * 32 + "\n*​ Welcome to the BBS server.​ *\n" + '*' * 32 + '\n' + f"Welcome, user{sessionID}."
+		self.Session[sessionID].send(welcome.encode())
+		print(f"[+] New Connection ({sessionID}) from {saddr[0]}:{saddr[1]}")
+		while True:
+			message = self.Session[sessionID].recv(1024).decode()
+			if len(message):
+				ArgList = message.split(" ")
+				serverMSG, cmd = "", ArgList[0]
+				if cmd == "mute":
+					if self.Status[sessionID] == 0:
+						serverMSG = "You are already in mute mode."
+						self.Session[sessionID].send(serverMSG.encode())
+					else:
+						serverMSG = "Mute mode."
+						self.Session[sessionID].send(serverMSG.encode())
+						self.Status[sessionID] = 0
+				elif cmd == "unmute":
+					if self.Status[sessionID] == 1:
+						serverMSG = "You are already in unmute mode."
+						self.Session[sessionID].send(serverMSG.encode())
+					else:
+						serverMSG = "Unmute mode."
+						self.Session[sessionID].send(serverMSG.encode())
+						self.Status[sessionID] = 1
+				elif cmd == "yell":
+					msg = f"user{sessionID}: {message[5:]}"
+					self.Broadcast(msg, sessionID)
+				elif cmd == "tell":
+					try:
+						recvID = int(ArgList[1][-1])
+						msg = f"user{sessionID} told you: {message.split(ArgList[1] + ' ')[1]}"
+						if recvID == sessionID:
+							serverMSG = "Any client can not send a message to himself."
+							self.Session[sessionID].send(serverMSG.encode())
+						elif self.Status[recvID] == 1:
+							self.Session[recvID].send(msg.encode())
+					except:
+						serverMSG = "Invalid command"
+						self.Session[sessionID].send(serverMSG.encode())
+				elif cmd == "exit":
+					break
+			else:
+				break
+		# Client Exit Event
+		print(f"[-] Connection ({sessionID}) {saddr[0]}:{saddr[1]} close...")
+		self.Session[sessionID].close()
+		self.Status[sessionID] = 0
+		del self.Session[sessionID]
+	def Broadcast(self, message, senderID):
+		for sessionID in self.Session.keys():
+			if sessionID != senderID and self.Status[sessionID] == 1:
+				try:
+					self.Session[sessionID].send(message.encode())
+				except Exception as err:
+					print(f"[x] E: {err}")
+					self.Status[sessionID] = 0
+	def Close(self):
+		for cthread in self.ClientThread:
+			cthread.join()
+		self.TCPsockfd.close()
+def main():
+	if len(sys.argv) != 2:
+		print(f"Usage:\n {sys.argv[0]} <Listen Port>")
+		exit(-1)
+	try:
+		ListenIP, ListenPort = "127.0.0.1", int(sys.argv[1])
+	except ValueError:
+		print(f"E: <Listen Port> {ListenPort} is invalid")
+		exit(-1)
+	ServSer = ServerService()
+	ServSer.CreateSockfd(ListenIP, ListenPort) # create TCP master socket
+	
+	ServSer.Listen()
+
+	ServSer.Close()
+if __name__ == "__main__":
+	main()

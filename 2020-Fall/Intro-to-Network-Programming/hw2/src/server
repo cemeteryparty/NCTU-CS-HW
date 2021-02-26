@@ -1,0 +1,333 @@
+#!/usr/bin/python3
+
+from socket import *
+from select import select
+import threading, sys, json, sqlite3, datetime
+
+class ServerService(object):
+	def __init__(self, HostName, ListenPort):
+		self.HostName = HostName
+		self.ListenPort = ListenPort
+		self.Session = {} # sessionID: (USERNAME, EMAIL)
+		self.connection = sqlite3.connect("db.sqlite3", check_same_thread = False)
+		self.cur = self.connection.cursor()
+		self.cur.execute("CREATE TABLE IF NOT EXISTS users(Username text, Email text, Passwd text)")
+		# Board & Post
+		self.tlock = threading.Lock()
+		self.Board = {} # Board[bname] = [owner, [S/N_1, S/N_2, ...]]
+		self.Post = [None] # Post[S/N] = [author, title, date, content, [cid1, cid2, ...]]
+		self.Comment = [] # Comment[cid] = [author, content]
+	def CreateSockfd(self):
+		# create TCP master socket
+		msockfd_t = socket(AF_INET, SOCK_STREAM)
+		msockfd_t.bind((self.HostName, self.ListenPort))
+		msockfd_t.listen(10) # listen queue max 10
+		# create UDP socket
+		sockfd_u = socket(AF_INET, SOCK_DGRAM)
+		sockfd_u.bind((self.HostName, self.ListenPort))
+		print(f"[*] Server listening on {self.HostName}:{self.ListenPort}")
+		return msockfd_t, sockfd_u
+	def HandleTCPslave(self, sockfd, saddr):
+		while True:
+			climsg = sockfd.recv(1024).decode()
+			msg2cli = self.HandleClientMsg(climsg, saddr)
+			sockfd.send(json.dumps(msg2cli).encode())
+			if msg2cli["sid"] == -1:
+				break
+		sockfd.close() # Client Exit Event
+	def HandleUDP(self, sockfd):
+		climsg, cliaddr = sockfd.recvfrom(1024)
+		climsg = climsg.decode()
+		msg2cli = self.HandleClientMsg(climsg, cliaddr)
+		sockfd.sendto(json.dumps(msg2cli).encode(), (cliaddr[0], cliaddr[1]))
+	def HandleClientMsg(self, climsg, cliaddr):
+		"""
+		"create-board", "create-post", "list-board", "list-post", "read",
+		"delete-post", "update-post", "comment"
+		"""
+		content = json.loads(climsg) # Decode climsg
+		ArgList, sessionID = content["msg"].split(" "), content["sid"]
+		servmsg, cmd = "", ArgList[0]
+		if sessionID != -1:
+			print(f"[*] Received {len(climsg)} bytes from {cliaddr[0]}:{cliaddr[1]}, {climsg}")
+
+		if cmd == "INITIAL" and sessionID == -1:
+			# If sid != -1, this client has finished initiate.
+			# Seen "INITIAL" as unknown cmd
+			servmsg, sessionID = self.InitNewClient()
+			print(f"[+] New Connection ({sessionID}) from {cliaddr[0]}:{cliaddr[1]}")
+		elif cmd == "register":
+			servmsg = self.RegisterEvent(len(ArgList), ArgList)
+		elif cmd == "login":
+			servmsg = self.LoginEvent(len(ArgList), ArgList, sessionID)
+		elif cmd == "logout":
+			servmsg = self.LogoutEvent(sessionID)
+		elif cmd == "whoami" or cmd == "list-user":
+			servmsg = self.QueryProfile(cmd, sessionID)
+		elif cmd == "create-board":
+			servmsg = self.CreateBoard(len(ArgList), ArgList, sessionID) # hw2
+		elif cmd == "create-post":
+			servmsg = self.CreatePost(len(ArgList), ArgList, sessionID) # hw2
+		elif cmd == "list-board":
+			servmsg = self.ListBoard() # hw2
+		elif cmd == "list-post":
+			servmsg = self.ListPost(len(ArgList), ArgList) # hw2
+		elif cmd == "read":
+			servmsg = self.ReadPost(len(ArgList), ArgList) # hw2
+		elif cmd == "delete-post":
+			servmsg = self.DeletePost(len(ArgList), ArgList, sessionID) # hw2
+		elif cmd == "update-post":
+			servmsg = self.UpdatePost(len(ArgList), ArgList, sessionID) # hw2
+		elif cmd == "comment":
+			servmsg = self.Comment2Post(len(ArgList), ArgList, sessionID) # hw2
+		elif cmd == "exit":
+			self.Session[sessionID] = None # clear Session
+			servmsg, sessionID = "CLIENTEXIT", -1
+			print(f"[-] Client ({cliaddr[0]}:{cliaddr[1]}) exit...")
+		elif cmd == "echo":
+			servmsg = content["msg"][5:]
+		else:
+			servmsg = f"{cmd}: Command not found."
+		return {"msg": servmsg, "sid": sessionID}
+	def InitNewClient(self):
+		sessionID = len(self.Session)
+		self.Session[sessionID] = (None, None)
+		return '*' * 32 + "\n** Welcome to the BBS server. **\n" + '*' * 32, sessionID
+	def RegisterEvent(self, argc, argv):
+		if argc != 4:
+			return "Usage: register <username> <email> <password>"
+		RegisterPermission = self.cur.execute("SELECT * FROM users WHERE Username=?", (argv[1],)).fetchone()
+		if RegisterPermission:
+			return "Username is already used." # print(RegisterPermission)
+		self.cur.execute("INSERT INTO users VALUES (?, ?, ?)", (argv[1], argv[2], argv[3]))		
+		self.connection.commit()
+		return "Register successfully."
+	def LoginEvent(self, argc, argv, sessionID):
+		if argc != 3:
+			return "Usage: login <username> <password>"
+		# if len(self.Session[sessionID]) and argv[1] == self.Session[sessionID][-1][0]:
+		if self.Session[sessionID][0]:
+			return "Please logout first."
+		LoginStatus = self.cur.execute("SELECT * FROM users WHERE Username=? AND Passwd=?", (argv[1], argv[2])).fetchone()
+		if LoginStatus:
+			self.Session[sessionID] = (LoginStatus[0], LoginStatus[1])
+			return f"Welcome, {argv[1]}."
+		return "Login failed."
+	def LogoutEvent(self, sessionID):
+		if not self.Session[sessionID][0]:
+			return "Please login first." # no previous login event
+		servmsg = f"Bye, {self.Session[sessionID][0]}."
+		self.Session[sessionID] = (None, None)
+		return servmsg
+	def QueryProfile(self, command, sessionID):
+		if command == "list-user":
+			UserTable = self.cur.execute("SELECT * FROM users")
+			UserList = "Name\tEmail"
+			for User in UserTable:
+				UserList += f"\n{User[0]}\t{User[1]}"
+			return UserList
+		if not self.Session[sessionID][0]:
+			return "Please login first." # no previous login event
+		return self.Session[sessionID][0] # command == "whoami"
+	##### hw2 ####
+	def CreateBoard(self, argc, argv, sessionID):
+		if argc != 2:
+			return "Usage: create-board <board-name>"
+		if not self.Session[sessionID][0]:
+			return "Please login first." # no previous login event
+		servmsg = "Create board successfully."
+		self.tlock.acquire()
+		if argv[1] in self.Board:
+			servmsg = "Board already exists."
+		else:
+			self.Board[argv[1]] = [self.Session[sessionID][0], []]
+		self.tlock.release()
+		return servmsg
+	def CreatePost(self, argc, argv, sessionID): # hw2
+		# argument check begin
+		if argc < 6:
+			return "Usage: create-post <board-name> --title <title> --content <content>"
+		bname, title, content, ai = argv[1], "", "", 2
+		while ai < argc:
+			if argv[ai] == "--title" and (ai + 1) < argc and argv[ai + 1] != "--content":
+				title += (argv[ai + 1] + " ")
+				argv[ai + 1] = "--title"
+			elif argv[ai] == "--content" and (ai + 1) < argc and argv[ai + 1] != "--title":
+				content += (argv[ai + 1].replace("<br>", "\n") + " ")
+				argv[ai + 1] = "--content"
+			ai += 1
+		if not (bname and title and content):
+			return "Usage: create-post <board-name> --title <title> --content <content>"
+		# argument check end
+		if not self.Session[sessionID][0]:
+			return "Please login first." # no previous login event
+		servmsg = "Create post successfully."
+		self.tlock.acquire()
+		if not (bname in self.Board):
+			servmsg = "Board does not exist."
+		else:
+			sn = len(self.Post)
+			# Post[S/N] = [author, title, date, content, [cid1, cid2, ...]]
+			self.Post.append([self.Session[sessionID][0], title, datetime.datetime.now().strftime("%m/%d"), content, []])
+			self.Board[bname][1].append(sn) # Board[bname] = [owner, [S/N_1, S/N_2, ...]]
+		self.tlock.release()
+		return servmsg
+	def ListBoard(self):
+		retmsg, bid = "Index\tName\tModerator", 1
+		# Board[bname] = [owner, [S/N_1, S/N_2, ...]]
+		self.tlock.acquire()
+		for bname in list(self.Board.keys()):
+			retmsg += f"\n{bid}\t{bname}\t{self.Board[bname][0]}"
+			bid += 1
+		self.tlock.release()
+		return retmsg
+	def ListPost(self, argc, argv):
+		if argc != 2:
+			return "Usage: list-post <board-name>"
+		bname, retmsg = argv[1], "S/N\tTitle\tAuthor\tDate"
+		self.tlock.acquire()
+		if not bname in self.Board:
+			retmsg = "Board does not exist."
+		else:
+			for sn in self.Board[bname][1]:
+				if self.Post[sn]:
+					retmsg += f"\n{sn}\t{self.Post[sn][1]}\t{self.Post[sn][0]}\t{self.Post[sn][2]}"
+		self.tlock.release()
+		return retmsg
+	def ReadPost(self, argc, argv):
+		if argc != 2:
+			return "Usage: read <post-S/N>"
+		try:
+			sn = int(argv[1])
+		except ValueError:
+			sn = 0
+		self.tlock.acquire()
+		if sn >= len(self.Post) or sn < 0 or (not self.Post[sn]):
+			retmsg = "Post does not exist."
+		else: # Post[S/N] = [author, title, date, content, [cid1, cid2, ...]]
+			retmsg = f"Author: {self.Post[sn][0]}\nTitle: {self.Post[sn][1]}\nDate: {self.Post[sn][2]}\n---\n{self.Post[sn][3]}\n---"
+			for cid in self.Post[sn][4]:
+				retmsg += f"\n{self.Comment[cid][0]}: {self.Comment[cid][1]}"
+		self.tlock.release()
+		return retmsg
+	def DeletePost(self, argc, argv, sessionID):
+		if argc != 2:
+			return "Usage: delete-post <post-S/N>"
+		try:
+			sn = int(argv[1])
+		except ValueError:
+			sn = 0
+		if not self.Session[sessionID][0]:
+			return "Please login first."
+		self.tlock.acquire()
+		retmsg = "Delete successfully."
+		if sn >= len(self.Post) or sn < 0 or (not self.Post[sn]):
+			retmsg = "Post does not exist."
+		else:
+			if self.Post[sn][0] == self.Session[sessionID][0]:
+				self.Post[sn] = None
+			else:
+				retmsg = "Not the post owner"
+		self.tlock.release()
+		return retmsg
+	def UpdatePost(self, argc, argv, sessionID):
+		# argument check begin
+		if argc < 4:
+			return "Usage: update-post <post-S/N> [--title <new-title>] [--content <new-content>]"
+		try:
+			sn = int(argv[1])
+		except ValueError:
+			sn = 0
+		title, content, ai = "", "", 2
+		while ai < argc:
+			if argv[ai] == "--title" and (ai + 1) < argc and argv[ai + 1] != "--content":
+				title += (argv[ai + 1] + " ")
+				argv[ai + 1] = "--title"
+			elif argv[ai] == "--content" and (ai + 1) < argc and argv[ai + 1] != "--title":
+				content += (argv[ai + 1].replace("<br>", "\n") + " ")
+				argv[ai + 1] = "--content"
+			ai += 1
+		if not (title or content):
+			return "Usage: create-post <board-name> --title <title> --content <content>"
+		# argument check end
+		if not self.Session[sessionID][0]:
+			return "Please login first."
+		self.tlock.acquire()
+		retmsg = "Update successfully."
+		if sn >= len(self.Post) or sn < 0 or (not self.Post[sn]):
+			retmsg = "Post does not exist."
+		else: # Post[S/N] = [author, title, date, content, [cid1, cid2, ...]]
+			if self.Post[sn][0] == self.Session[sessionID][0]:
+				if title:
+					self.Post[sn][1] = title
+				if content:
+					self.Post[sn][3] = content
+			else:
+				retmsg = "Not the post owner"
+		self.tlock.release()
+		return retmsg
+	def Comment2Post(self, argc, argv, sessionID):
+		# argument check begin
+		if argc < 3:
+			return "Usage: comment <post-S/N> <comment>"
+		try:
+			sn = int(argv[1])
+		except ValueError:
+			sn = 0
+		comment = ""
+		for arg in argv[2:]:
+			comment += (arg + " ")
+		# argument check end
+		if not self.Session[sessionID][0]:
+			return "Please login first."
+		self.tlock.acquire()
+		retmsg = "Comment successfully."
+		if sn >= len(self.Post) or sn < 0 or (not self.Post[sn]):
+			retmsg = "Post does not exist."
+		else: # Post[S/N] = [author, title, date, content, [cid1, cid2, ...]] # Comment[cid] = [author, content]
+			cid = len(self.Comment)
+			self.Comment.append([self.Session[sessionID][0], comment])
+			self.Post[sn][4].append(cid)
+		self.tlock.release()
+		return retmsg
+	#### hw2 ####
+	def Close(self):
+		self.connection.close()
+def main():
+	if len(sys.argv) != 2:
+		print(f"Usage:\n {sys.argv[0]} <Listen Port>")
+		exit(-1)
+	try:
+		HostName, ListenPort = "127.0.0.1", int(sys.argv[1])
+	except ValueError:
+		print(f"E: <Listen Port> {sys.argv[1]} is invalid")
+		exit(-1)
+	ServSer = ServerService(HostName, ListenPort)
+	
+	TCPsockfd, UDPsockfd = ServSer.CreateSockfd() # create TCP master socket, UDP socket
+	SockfdSet, SlaveThreads = [TCPsockfd, UDPsockfd], []
+	
+	while True:
+		try:
+			rdlist, wrlist, exlist = select(SockfdSet, [], [], 0)
+			for sockfd in rdlist:
+				if sockfd == TCPsockfd:
+					clientfd, cliaddr = sockfd.accept() # tcp slave socket
+					# Keep-Alive TCP
+					handler = threading.Thread(target = ServSer.HandleTCPslave, args = (clientfd, cliaddr))
+					SlaveThreads.append(handler)
+					handler.start()
+				elif sockfd == UDPsockfd:
+					ServSer.HandleUDP(sockfd)
+				else:
+					print(f"[!] Unknown type of socket: {sockfd}")
+		except KeyboardInterrupt:
+			print("\n[-] Server close...")
+			break
+	for sockfd in SockfdSet:
+		sockfd.close()
+	for st in SlaveThreads:
+		st.join()
+	ServSer.Close()
+if __name__ == "__main__":
+	main()

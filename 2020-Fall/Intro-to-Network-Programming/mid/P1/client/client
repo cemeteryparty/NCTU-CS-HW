@@ -1,0 +1,73 @@
+#!/usr/bin/python3
+
+from socket import *
+import sys, os
+
+class ClientService(object):
+	def __init__(self, ServerIP, ServerPort):
+		self.ServerIP = ServerIP
+		self.ServerPort = ServerPort
+	def CreateSockfd(self):
+		try:
+			# create UDP socket
+			self.UDPsockfd = socket(AF_INET, SOCK_DGRAM)
+		except Exception as err:
+			print(f"[x] E: {err}")
+			exit(-1)
+	def UDPsender(self, climsg):
+		sockfd = self.UDPsockfd
+		ArgList = climsg.split(" ")
+		servmsg, cmd = "", ArgList[0]
+		sockfd.sendto(climsg.encode(), (self.ServerIP, self.ServerPort))
+		if cmd == "get-file":
+			servmsg = self.GetFile(len(ArgList), ArgList)
+		else:
+			servmsg, servaddr = sockfd.recvfrom(1024)
+			servmsg = servmsg.decode()
+		return servmsg
+	def GetFile(self, argc, argv):
+		sockfd = self.UDPsockfd
+		datagram, peeraddr = sockfd.recvfrom(1024)
+		if datagram.decode() != "finit":
+			return datagram.decode()
+		SvFPath = argv[1]
+		try:
+			ffd = open(SvFPath, "wb")
+		except Exception as err:
+			print(f"E: {err}")
+			self.Close()
+			exit(-1)
+		while True:
+			datagram, peeraddr = sockfd.recvfrom(1024)
+			if datagram == b"fend":
+				break
+			ffd.write(datagram)
+		ffd.close()
+		return f"Sucessfully download {SvFPath}"
+	def Close(self):
+		self.UDPsockfd.close()
+def main():
+	if len(sys.argv) != 3:
+		print(f"Usage:\n {sys.argv[0]} <Server IP> <Server Port>")
+		exit(-1)
+	try:
+		ServerIP, ServerPort = sys.argv[1], int(sys.argv[2])
+	except ValueError:
+		print(f"E: {ServerPort} isn't a valid port number.")
+		exit(-1)
+	CliSer = ClientService(ServerIP, ServerPort)
+	CliSer.CreateSockfd() # create UDP socket
+
+	while True:
+		try:
+			climsg = input("% ")
+			servmsg = CliSer.UDPsender(climsg)
+			if climsg == "exit":
+				break
+			print(servmsg)
+		except KeyboardInterrupt:
+			CliSer.UDPsender("exit")
+	
+	CliSer.Close()
+if __name__ == "__main__":
+	main()

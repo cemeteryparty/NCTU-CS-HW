@@ -1,0 +1,127 @@
+#!/usr/bin/python3
+
+from socket import *
+import threading, sys, time
+
+class ServerService(object):
+	def __init__(self, ):
+		self.Session = {} # sid: sockfd
+		self.ClientThread = []
+		self.tlock = threading.Lock()
+		self.Account = {"ACCOUNT1": 0, "ACCOUNT2": 0}
+	def CreateSockfd(self, ListenIP, ListenPort):
+		try:
+			self.TCPsockfd = socket(AF_INET, SOCK_STREAM)
+			self.TCPsockfd.bind((ListenIP, ListenPort))
+		except Exception as err:
+			print(f"[x] E: {err}")
+			exit(-1)
+		print(f"[*] Server listening on {ListenIP}:{ListenPort}")
+	def Listen(self):
+		sessionID = 65
+		try:
+			self.TCPsockfd.listen(10) # listen queue max 10
+			while True:
+				try:
+					if len(self.Session) >= 4:
+						continue
+					clientfd, cliaddr = self.TCPsockfd.accept() # tcp slave socket
+					self.Session[sessionID] = clientfd
+					
+					SlaveThread = threading.Thread(target = self.HandleTCPslave,args = (sessionID, cliaddr))
+					self.ClientThread.append(SlaveThread)
+					SlaveThread.start()
+
+					sessionID += 1 # next new connection
+				except KeyboardInterrupt:
+					print("\n[-] Server close...")
+					break
+		except Exception as err:
+			print(f"[x] E: {err}")
+			exit(-1)
+	def HandleTCPslave(self, sessionID, saddr):
+		welcome = '*' * 29 + "\n* Welcome to the TCPserver. *\n" + '*' * 29
+		self.Session[sessionID].send(welcome.encode())
+		print(f"New connection from {saddr[0]}:{saddr[1]} ({chr(sessionID)})")
+		while True:
+			message = self.Session[sessionID].recv(1024).decode()
+			if len(message):
+				ArgList = message.split(" ")
+				serverMSG, cmd = "", ArgList[0]
+				if cmd == "show-accounts":
+					self.tlock.acquire()
+					MoneyinAcc = [self.Account["ACCOUNT1"], self.Account["ACCOUNT2"]]
+					serverMSG = f"ACCOUNT1: {MoneyinAcc[0]}\nACCOUNT2: {MoneyinAcc[1]}"
+					self.tlock.release()
+				elif cmd == "deposit":
+					if len(ArgList) != 3:
+						serverMSG = "Usage: deposit <account> <money>"
+					else:
+						try:
+							AccName, Money = ArgList[1], int(ArgList[2])
+							self.tlock.acquire()
+							if AccName not in self.Account:
+								serverMSG = "Account not exists."
+							elif Money <= 0:
+								serverMSG = "Deposit a non-positive number into accounts."
+							else:
+								self.Account[AccName] += Money
+								serverMSG = f"Successfully deposits {Money} into {AccName}."
+							self.tlock.release()
+						except ValueError:
+							serverMSG = "Invalid parameter: <money>"
+				elif cmd == "withdraw":
+					if len(ArgList) != 3:
+						serverMSG = "Usage: withdraw <account> <money>"
+					else:
+						try:
+							AccName, Money = ArgList[1], int(ArgList[2])
+							self.tlock.acquire()
+							if AccName not in self.Account:
+								serverMSG = "Account not exists."
+							elif Money <= 0:
+								serverMSG = "Withdraw a non-positive number from accounts."
+							elif Money > self.Account[AccName]:
+								serverMSG = "Withdraw excess money from accounts."
+							else:
+								self.Account[AccName] -= Money
+								serverMSG = f"Successfully withdraws {Money} from {AccName}."
+							self.tlock.release()
+						except ValueError:
+							serverMSG = "Invalid parameter: <money>"
+				elif cmd == "exit":
+					break
+				else:
+					serverMSG = "Unknown command"
+				if serverMSG:
+					try:
+						self.Session[sessionID].send(serverMSG.encode())
+					except Exception as err:
+						print(f"[x] E: {err}")
+						break
+			else:
+				break
+		self.Session[sessionID].close()
+		del self.Session[sessionID]
+		print(f"({chr(sessionID)}) {saddr[0]}:{saddr[1]} disconnected")
+	def Close(self):
+		for cthread in self.ClientThread:
+			cthread.join()
+		self.TCPsockfd.close()
+def main():
+	if len(sys.argv) != 2:
+		print(f"Usage:\n {sys.argv[0]} <Listen Port>")
+		exit(-1)
+	try:
+		ListenIP, ListenPort = "127.0.0.1", int(sys.argv[1])
+	except ValueError:
+		print(f"E: <Listen Port> {ListenPort} is invalid")
+		exit(-1)
+	ServSer = ServerService()
+	ServSer.CreateSockfd(ListenIP, ListenPort) # create TCP master socket
+	
+	ServSer.Listen()
+
+	ServSer.Close()
+if __name__ == "__main__":
+	main()

@@ -1,0 +1,52 @@
+#!/usr/bin/python3
+
+from socket import *
+from select import select
+import sys
+
+class ClientService(object):
+	def __init__(self):
+		# create TCP socket
+		try:
+			self.TCPsockfd = socket(AF_INET, SOCK_STREAM)
+		except Exception as err:
+			print(f"[x] E: {err}")
+			exit(-1)
+	def Connect2Server(self, ServerIP, ServerPort):
+		try:
+			self.TCPsockfd.connect((ServerIP, ServerPort))
+		except Exception as err:
+			print(f"[x] E: {err}")
+			return
+		while True:
+			try:
+				rdlist, wrlist, exlist = select([self.TCPsockfd, sys.stdin], [], [])
+				for sockfd in rdlist:
+					if sockfd == self.TCPsockfd:
+						message = sockfd.recv(1024).decode()
+						print(message)
+					else:
+						message = sys.stdin.readline().strip()
+						self.TCPsockfd.send(message.encode())
+						if message == "exit":
+							return
+			except KeyboardInterrupt:
+				return
+	def Close(self):
+		self.TCPsockfd.close()
+def main():
+	if len(sys.argv) != 3:
+		print(f"Usage:\n {sys.argv[0]} <Server IP> <Server Port>")
+		exit(-1)
+	try:
+		ServerIP, ServerPort = sys.argv[1], int(sys.argv[2])
+	except ValueError:
+		print(f"E: <Server Port> {ServerPort} is invalid")
+		exit(-1)
+	CliSer = ClientService()
+
+	CliSer.Connect2Server(ServerIP, ServerPort)
+
+	CliSer.Close()
+if __name__ == "__main__":
+	main()
