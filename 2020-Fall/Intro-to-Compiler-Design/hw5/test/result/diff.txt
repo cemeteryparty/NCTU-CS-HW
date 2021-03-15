@@ -1,0 +1,28 @@
+stringtest
+--- your output:(./code_executed_result/stringtest)
++++ answer:(./bonus_cases/sample-solutions/stringtest)
+@@ -1,2 +1,3 @@
+ bbl loader
+-couldn't open ELF program: ./executable/stringtest!
++hello
++hello
+
+realtest1
+--- your output:(./code_executed_result/realtest1)
++++ answer:(./bonus_cases/sample-solutions/realtest1)
+@@ -1,2 +1,4 @@
+ bbl loader
+-couldn't open ELF program: ./executable/realtest1!
++1.100000
++2.200000
++1.100000
+
+realtest2
+--- your output:(./code_executed_result/realtest2)
++++ answer:(./bonus_cases/sample-solutions/realtest2)
+@@ -1,2 +1,3 @@
+ bbl loader
+-couldn't open ELF program: ./executable/realtest2!
++3.300000
++2.200000
+
